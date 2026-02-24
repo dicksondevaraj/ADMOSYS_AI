@@ -1,0 +1,21 @@
+# --- Virtual Environment ---
+env/
+venv/
+
+# --- Python cache ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- VS Code ---
+.vscode/
+
+# --- Model Weights (Private) ---
+model/
+*.keras
+*.tflite
+*.cc
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
