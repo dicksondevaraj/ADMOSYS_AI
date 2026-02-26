@@ -33,21 +33,34 @@ POSITION_TOLERANCE = 3.0     # mm
 COOLDOWN = 2.0               # seconds between movements
 PWM_DUTY = 60                # % (safe limit)
 
+
+
+# ===============================
+# GPIO SETUP
+# ===============================
+
 # GPIO setup
 IN1 = 23
 IN2 = 24
 PWM_PIN = 18
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(IN1, GPIO.OUT)
-GPIO.setup(IN2, GPIO.OUT)
-GPIO.setup(PWM_PIN, GPIO.OUT)
+if GPIO:
+    GPIO.setmode(GPIO.BCM)
 
-pwm = GPIO.PWM(PWM_PIN, 1000)
-pwm.start(0)
-# Ensure motor is OFF at startup
-GPIO.output(IN1, GPIO.LOW)
-GPIO.output(IN2, GPIO.LOW)
+    GPIO.setup(IN1, GPIO.OUT)
+    GPIO.setup(IN2, GPIO.OUT)
+    GPIO.setup(PWM_PIN, GPIO.OUT)
+
+    pwm = GPIO.PWM(PWM_PIN, 1000)
+    pwm.start(0)
+
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.LOW)
+
+else:
+    print("Running in simulation mode (No GPIO)")
+    pwm = None
+
 
 
 # ===============================
@@ -76,25 +89,32 @@ def update_position(direction, duration):
 # ===============================
 
 def stop_motor():
-    GPIO.output(IN1, GPIO.LOW)
-    GPIO.output(IN2, GPIO.LOW)
-    pwm.ChangeDutyCycle(0)
+    if GPIO and pwm:
+        GPIO.output(IN1, GPIO.LOW)
+        GPIO.output(IN2, GPIO.LOW)
+        pwm.ChangeDutyCycle(0)
 
 
 def extend(duration):
-    GPIO.output(IN1, GPIO.HIGH)
-    GPIO.output(IN2, GPIO.LOW)
-    pwm.ChangeDutyCycle(PWM_DUTY)
-    time.sleep(duration)
-    stop_motor()
+    if GPIO and pwm:
+        GPIO.output(IN1, GPIO.HIGH)
+        GPIO.output(IN2, GPIO.LOW)
+        pwm.ChangeDutyCycle(PWM_DUTY)
+        time.sleep(duration)
+        stop_motor()
+    else:
+        print("Simulated extend")
 
 
 def retract(duration):
-    GPIO.output(IN1, GPIO.LOW)
-    GPIO.output(IN2, GPIO.HIGH)
-    pwm.ChangeDutyCycle(PWM_DUTY)
-    time.sleep(duration)
-    stop_motor()
+    if GPIO and pwm:
+        GPIO.output(IN1, GPIO.LOW)
+        GPIO.output(IN2, GPIO.HIGH)
+        pwm.ChangeDutyCycle(PWM_DUTY)
+        time.sleep(duration)
+        stop_motor()
+    else:
+        print("Simulated retract")
 
 
 # ===============================
@@ -165,7 +185,7 @@ try:
 
         features = extract_features(rpm, torque, current, vibration, temperature)
 
-        ai_value = run_ai(features)
+        ai_value = np.sin(time.time())   # run_ai(features)  # Uncomment to use AI prediction
 
         # Smooth AI output
         ai_value = alpha * ai_value + (1 - alpha) * prev_ai
@@ -196,4 +216,5 @@ try:
 
 except KeyboardInterrupt:
     stop_motor()
-    GPIO.cleanup()
+    if GPIO:
+        GPIO.cleanup() 
