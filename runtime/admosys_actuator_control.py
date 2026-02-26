@@ -1,4 +1,235 @@
 import numpy as np
+import time
+import os
+import tflite_runtime.interpreter as tflite
+
+# ===============================
+# GPIO IMPORT (Safe)
+# ===============================
+
+try:
+    import RPi.GPIO as GPIO
+except ImportError:
+    GPIO = None
+    print("Running in simulation mode (No GPIO)")
+
+# ===============================
+# PATH SETUP
+# ===============================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+TFLITE_PATH = os.path.join(BASE_DIR, "admosys_model.tflite")
+MEAN_PATH = os.path.join(BASE_DIR, "X_mean.npy")
+STD_PATH = os.path.join(BASE_DIR, "X_std.npy")
+
+# ===============================
+# LOAD NORMALIZATION
+# ===============================
+
+X_mean = np.load(MEAN_PATH)
+X_std = np.load(STD_PATH)
+
+# ===============================
+# LOAD TFLITE MODEL
+# ===============================
+
+interpreter = tflite.Interpreter(model_path=TFLITE_PATH)
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+print("TFLite model loaded successfully")
+
+# ===============================
+# SYSTEM CONFIG
+# ===============================
+
+STROKE_LENGTH = 100.0
+SPEED_FULL_LOAD = 4.2
+UPDATE_INTERVAL = 0.5
+MOVE_DURATION = 0.3
+POSITION_TOLERANCE = 3.0
+COOLDOWN = 2.0
+PWM_DUTY = 60
+
+# ===============================
+# GPIO CONFIG (BTS7960)
+# ===============================
+
+RPWM = 18
+LPWM = 19
+
+if GPIO:
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setwarnings(False)
+
+    GPIO.setup(RPWM, GPIO.OUT)
+    GPIO.setup(LPWM, GPIO.OUT)
+
+    rpwm = GPIO.PWM(RPWM, 1000)
+    lpwm = GPIO.PWM(LPWM, 1000)
+
+    rpwm.start(0)
+    lpwm.start(0)
+else:
+    rpwm = None
+    lpwm = None
+
+# ===============================
+# POSITION ESTIMATION
+# ===============================
+
+current_position_mm = 50.0
+last_move_time = 0
+
+def update_position(direction, duration):
+    global current_position_mm
+    distance = SPEED_FULL_LOAD * duration
+
+    if direction == "extend":
+        current_position_mm += distance
+    elif direction == "retract":
+        current_position_mm -= distance
+
+    current_position_mm = max(0, min(STROKE_LENGTH, current_position_mm))
+
+# ===============================
+# MOTOR CONTROL
+# ===============================
+
+def stop_motor():
+    if GPIO and rpwm and lpwm:
+        rpwm.ChangeDutyCycle(0)
+        lpwm.ChangeDutyCycle(0)
+
+def extend(duration):
+    if GPIO and rpwm and lpwm:
+        lpwm.ChangeDutyCycle(0)
+        rpwm.ChangeDutyCycle(PWM_DUTY)
+        time.sleep(duration)
+        stop_motor()
+    else:
+        print("Simulated extend")
+
+def retract(duration):
+    if GPIO and rpwm and lpwm:
+        rpwm.ChangeDutyCycle(0)
+        lpwm.ChangeDutyCycle(PWM_DUTY)
+        time.sleep(duration)
+        stop_motor()
+    else:
+        print("Simulated retract")
+
+# ===============================
+# FEATURE EXTRACTION
+# ===============================
+
+dt = 0.02
+
+def extract_features(rpm, torque, current, vibration, temperature):
+    avg_rpm = np.mean(rpm)
+    rpm_slope = (rpm[-1] - rpm[0]) / dt
+
+    avg_torque = np.mean(torque)
+    torque_var = np.var(torque)
+
+    current_ripple = np.sqrt(np.mean((current - np.mean(current))**2))
+
+    vib_rms = np.sqrt(np.mean(vibration**2))
+    vib_peak_ratio = np.max(vibration) / (vib_rms + 1e-6)
+
+    motor_temp = temperature[-1]
+    temp_slope = (temperature[-1] - temperature[0]) / dt
+
+    return np.array([
+        avg_rpm,
+        rpm_slope,
+        avg_torque,
+        torque_var,
+        current_ripple,
+        vib_rms,
+        vib_peak_ratio,
+        motor_temp,
+        temp_slope
+    ])
+
+# ===============================
+# AI INFERENCE (TFLITE)
+# ===============================
+
+def run_ai(features):
+    features_norm = (features - X_mean) / X_std
+    input_data = features_norm.reshape(1, -1).astype(np.float32)
+
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    interpreter.invoke()
+
+    output = interpreter.get_tensor(output_details[0]['index'])
+    return float(output[0][0])
+
+def ai_to_target_mm(ai_value):
+    stiffness = (ai_value + 1) / 2
+    return stiffness * STROKE_LENGTH
+
+# ===============================
+# MAIN LOOP
+# ===============================
+
+prev_ai = 0
+alpha = 0.3
+
+try:
+    while True:
+
+        # Replace with real sensor data later
+        rpm = np.random.uniform(1000, 1500, 5)
+        torque = np.random.uniform(0.4, 0.7, 5)
+        current = np.random.uniform(10, 15, 5)
+        vibration = np.random.uniform(0.01, 0.04, 5)
+        temperature = np.random.uniform(50, 65, 5)
+
+        features = extract_features(rpm, torque, current, vibration, temperature)
+
+        ai_value = run_ai(features)
+
+        # Smooth output
+        ai_value = alpha * ai_value + (1 - alpha) * prev_ai
+        prev_ai = ai_value
+
+        ai_value = np.clip(ai_value, -1, 1)
+
+        target_mm = ai_to_target_mm(ai_value)
+        error = target_mm - current_position_mm
+
+        bar_length = int((ai_value + 1) * 20)  # scale -1..1 to 0..40
+        bar = "#" * bar_length
+        print(f"AI: {ai_value:+.3f} | {bar}")
+
+        if abs(error) > POSITION_TOLERANCE:
+            if time.time() - last_move_time > COOLDOWN:
+
+                if error > 0 and current_position_mm < STROKE_LENGTH:
+                    extend(MOVE_DURATION)
+                    update_position("extend", MOVE_DURATION)
+
+                elif error < 0 and current_position_mm > 0:
+                    retract(MOVE_DURATION)
+                    update_position("retract", MOVE_DURATION)
+
+                last_move_time = time.time()
+
+        time.sleep(UPDATE_INTERVAL)
+
+except KeyboardInterrupt:
+    print("Stopping system...")
+    stop_motor()
+    if GPIO:
+        GPIO.cleanup()
+
+"""
+import numpy as np
 import tensorflow as tf
 try:
     import RPi.GPIO as GPIO
@@ -218,3 +449,4 @@ except KeyboardInterrupt:
     stop_motor()
     if GPIO:
         GPIO.cleanup() 
+"""
